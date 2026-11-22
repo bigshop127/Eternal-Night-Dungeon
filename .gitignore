@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+# 使用者本機資料（每台電腦不同、會一直變）
+config.json
+config.json.tmp
+rules.json.tmp
+route_progress.json
+route_progress.json.tmp
+switch_memory.json
+switch_memory.json.tmp
+app_log.txt
+recorder_log.txt
+# 很大的原始素材與備份
+sessions/
+backup/
+debug_frames/

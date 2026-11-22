@@ -1,0 +1,167 @@
+{
+  "version": 1,
+  "store": 56,
+  "reject": 1.861,
+  "entries": [
+    {
+      "kind": "chest",
+      "file": "chest/001.png"
+    },
+    {
+      "kind": "enemy",
+      "file": "enemy/001.png"
+    },
+    {
+      "kind": "enemy",
+      "file": "enemy/002.png"
+    },
+    {
+      "kind": "heal",
+      "file": "heal/001.png"
+    },
+    {
+      "kind": "enemy",
+      "file": "enemy/003.png"
+    },
+    {
+      "kind": "device",
+      "file": "device/001.png"
+    },
+    {
+      "kind": "enemy",
+      "file": "enemy/004.png"
+    },
+    {
+      "kind": "heal",
+      "file": "heal/002.png"
+    },
+    {
+      "kind": "enemy",
+      "file": "enemy/005.png"
+    },
+    {
+      "kind": "device",
+      "file": "device/002.png"
+    },
+    {
+      "kind": "chest",
+      "file": "chest/002.png"
+    },
+    {
+      "kind": "chest",
+      "file": "chest/003.png"
+    },
+    {
+      "kind": "enemy",
+      "file": "enemy/006.png"
+    },
+    {
+      "kind": "device",
+      "file": "device/003.png"
+    },
+    {
+      "kind": "chest",
+      "file": "chest/004.png"
+    },
+    {
+      "kind": "chest",
+      "file": "chest/005.png"
+    },
+    {
+      "kind": "heal",
+      "file": "heal/003.png"
+    },
+    {
+      "kind": "enemy",
+      "file": "enemy/007.png"
+    },
+    {
+      "kind": "enemy",
+      "file": "enemy/008.png"
+    },
+    {
+      "kind": "revive",
+      "file": "revive/001.png"
+    },
+    {
+      "kind": "chest",
+      "file": "chest/006.png"
+    },
+    {
+      "kind": "device",
+      "file": "device/004.png"
+    },
+    {
+      "kind": "enemy",
+      "file": "enemy/009.png"
+    },
+    {
+      "kind": "device",
+      "file": "device/005.png"
+    },
+    {
+      "kind": "enemy",
+      "file": "enemy/010.png"
+    },
+    {
+      "kind": "heal",
+      "file": "heal/004.png"
+    },
+    {
+      "kind": "enemy",
+      "file": "enemy/011.png"
+    },
+    {
+      "kind": "chest",
+      "file": "chest/007.png"
+    },
+    {
+      "kind": "chest",
+      "file": "chest/008.png"
+    },
+    {
+      "kind": "enemy",
+      "file": "enemy/012.png"
+    },
+    {
+      "kind": "chest",
+      "file": "chest/009.png"
+    },
+    {
+      "kind": "enemy",
+      "file": "enemy/013.png"
+    },
+    {
+      "kind": "device",
+      "file": "device/006.png"
+    },
+    {
+      "kind": "revive",
+      "file": "revive/002.png"
+    },
+    {
+      "kind": "enemy",
+      "file": "enemy/014.png"
+    },
+    {
+      "kind": "enemy",
+      "file": "enemy/015.png"
+    },
+    {
+      "kind": "heal",
+      "file": "heal/005.png"
+    },
+    {
+      "kind": "enemy",
+      "file": "enemy/016.png"
+    },
+    {
+      "kind": "device",
+      "file": "device/007.png"
+    },
+    {
+      "kind": "enemy",
+      "file": "enemy/017.png"
+    }
+  ]
+}
