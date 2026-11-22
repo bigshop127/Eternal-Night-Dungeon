@@ -14,3 +14,5 @@ recorder_log.txt
 sessions/
 backup/
 debug_frames/
+dist/
+_build_lang.py

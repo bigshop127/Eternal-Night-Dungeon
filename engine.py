@@ -19,6 +19,7 @@ import json
 import os
 import queue
 import shutil
+import sys
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -35,7 +36,9 @@ import vision_state as V
 
 # 資料夾可以用環境變數換掉——測試不能去動使用者真正的設定與樣板庫
 # （fruit2048 踩過「測試把真實 templates.json 寫壞」的坑）。
-APP_DIR = os.environ.get("ENDUNGEON_DATA_DIR") or os.path.dirname(os.path.abspath(__file__))
+APP_DIR = os.environ.get("ENDUNGEON_DATA_DIR") or (
+    os.path.dirname(os.path.abspath(sys.executable)) if getattr(sys, "frozen", False)     # 打包成 exe：資料放在 exe 旁邊
+    else os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 TEMPLATES_DIR = os.path.join(APP_DIR, "templates")
 RULES_PATH = os.path.join(APP_DIR, "rules.json")
@@ -124,7 +127,8 @@ class Config:
     route_enabled: bool = True             # 前三個階段照使用者 10/01 指定的固定路線走（route.py），走完照原本規則
     # 操控方式（11/22）：screen＝原本的「框選範圍＋螢幕擷取＋點滑鼠」；adb＝背景操控（adb 截圖／點擊，不碰滑鼠，
     # 模擬器被蓋住或縮到最小都照跑，見 adb_io.py）
-    control_mode: str = "screen"
+    language: str = ""                     # 介面語言：zh／en（空白＝依打包預設，見 i18n.py）
+    control_mode: str = "adb"             # 11/22 起預設背景操控
     adb_serial: str = A.DEFAULT_SERIAL     # BlueStacks「1」；連不上會自動改用開著 ADB 的那台
     # 換邊（一隊走完一段、碰到裝置，回頭找另一隊）大步快拖（11/22，見 overview.fast_scan_legs）
     switch_scale: float = 1.75             # 每一步拖多遠（上下 ×這個、左右 ×它的平方根）；1＝關掉，用原本的走法

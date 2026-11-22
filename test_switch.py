@@ -377,7 +377,68 @@ def test_live_1122():
     check("重打點下去、離開總覽 → 不再標記重打", r.retry is None)
 
 
+def test_any_lineup():
+    print("\n12. 陣容不同也照跑（朋友的英雄顏色規則認不得、甚至認反）")
+    import math
+    import sys as _sys
+    here = os.path.dirname(os.path.abspath(__file__))
+    S = os.path.join(here, "sessions", "20260920_003739")
+    real = os.path.isdir(S)
+    orig = O._identify_hero
+    if real:
+        _sys.path.insert(0, os.path.join(here, "tools"))
+        import build_overview_assets as B
+        import test_route as TR
+        labels, clicks = B.load_session(S)
+        clf = O.NodeClassifier.load(os.path.join(here, "overview_assets", "nodes"))
+        cases = [c for c in TR.REAL_CASES if labels.get(c[0] - 1) != "總覽" and c[2] > 0]   # 剛行動完、鏡頭對著它的畫面
+        for name, fake in (("顏色規則把每個英雄都認成相反的隊",
+                            lambda img, x, y, s: (lambda r: (r[0], O.other_side(r[1]) if r[1] else None))(orig(img, x, y, s))),
+                           ("顏色規則完全認不出英雄（平台上有沒有人都判斷不了）", lambda img, x, y, s: (False, None))):
+            O._identify_hero = fake
+            good, bad = 0, []
+            try:
+                for i, side, idx, mode in cases:
+                    img = B.frame(S, i)
+                    s = img.shape[0] / O.REF_H
+                    r = RT.RouteTracker(None)
+                    r.idx = {side: idx, O.other_side(side): r.total(O.other_side(side))}
+                    r.last_actor = side
+                    pl = O.MapPlanner(clf, route=r)              # 不給英雄樣板（朋友的英雄沒有樣板）
+                    pl._fresh_actor = side
+                    pl.observe(img, 0.0)
+                    plan = pl.decide(pl.observe(img, 0.15), img.shape, 0.2)
+                    cx, cy = clicks[i]["region_rel_xy"]
+                    if plan.kind == "click" and plan.route == (side, idx) and \
+                            (math.hypot(plan.x - cx, plan.y - cy) <= 50 * s) == (mode == TR.SAME):
+                        good += 1
+                    else:
+                        bad.append(f"#{i} {plan.kind} {plan.reason[:30]}")
+            finally:
+                O._identify_hero = orig
+            check(f"{name}：剛行動完的 {len(cases)} 個真實畫面照路線點對", good == len(cases) or (good >= len(cases) - 1 and
+                  all(b.startswith("#106") for b in bad)), f"{good}/{len(cases)} {bad[:3]}")
+    else:
+        print("  （沒有 9/20 錄製，略過真實畫面部分）")
+
+    # 換邊：兩隊英雄都認不出是哪隊（FakeWorld 平台 side=None），靠「剛行動那隊被拖出畫面」找另一隊
+    far = (int(0.85 * W), int(1.9 * H))
+    w = TO.FakeWorld(teams={"左?": (0, 0), "右?": far}, nodes={"右?": O.CHEST}, start="左?")
+    pl = planner(route_after_left_done(), 1.75)
+    seen, plan = TO.run_world(pl, w)
+    check("換邊：兩隊都認不出是誰，照樣找到右隊、點路線要的寶箱",
+          plan.kind == "click" and plan.side == R and plan.route == (R, 13), f"{plan.kind} {plan.reason[:40]} {seen}")
+    # 鏡頭正中那隊被顏色規則認成另一隊（今天尖帽法師的狀況）：仍以「剛行動的隊」為準
+    w2 = TO.FakeWorld(teams={L: (0, 0), R: far}, nodes={R: O.CHEST}, start=L)
+    w2.teams = {R + "wrong": (0, 0), "右?": far}                 # 左隊站的平台被認成「不知道」
+    w2.nodes = {"右?": O.CHEST}
+    seen2, plan2 = TO.run_world(planner(route_after_left_done(), 1.75), w2)
+    check("剛行動的左隊被認不出：不會把它當右隊，照樣去找右隊", plan2.kind == "click" and plan2.route == (R, 13),
+          f"{plan2.kind} {plan2.reason[:40]}")
+
+
 def main():
+    test_any_lineup()
     test_live_1122()
     test_geometry()
     test_fake_switch()

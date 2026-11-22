@@ -59,12 +59,14 @@ from tkinter import messagebox, ttk  # noqa: E402
 
 import control as C  # noqa: E402
 import engine as E  # noqa: E402
+import i18n  # noqa: E402
+i18n.install_tk(tk, messagebox)   # 英文版：所有 Tk 文字／標題／訊息框經過 i18n.T()
 import recorder as R  # noqa: E402
 import vision_state as V  # noqa: E402
 
 # ---------------------------------------------------------------- 外觀（跟水果2048同一套）
 
-UI_FONT = "Microsoft JhengHei UI"
+UI_FONT = "Segoe UI" if i18n.LANG == "en" else "Microsoft JhengHei UI"
 BG = "#1c1f24"
 BG_PANEL = "#262a31"
 FG = "#e8eaed"

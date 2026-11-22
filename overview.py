@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import sys
 from dataclasses import dataclass
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
@@ -34,7 +35,9 @@ import numpy as np
 from PIL import Image
 
 # 資料夾可以用環境變數換掉（跟 engine.py 同一個約定）——測試不能去動使用者真正的樣板
-APP_DIR = os.environ.get("ENDUNGEON_DATA_DIR") or os.path.dirname(os.path.abspath(__file__))
+APP_DIR = os.environ.get("ENDUNGEON_DATA_DIR") or (
+    os.path.dirname(os.path.abspath(sys.executable)) if getattr(sys, "frozen", False)     # 打包成 exe：資料放在 exe 旁邊
+    else os.path.dirname(os.path.abspath(__file__)))
 ASSETS_DIR = os.path.join(APP_DIR, "overview_assets")
 NODES_DIR = os.path.join(ASSETS_DIR, "nodes")
 HEROES_DIR = os.path.join(ASSETS_DIR, "heroes")
@@ -607,7 +610,7 @@ def _identify_hero(img: np.ndarray, px: int, py: int, s: float) -> Tuple[bool, O
     return True, None
 
 
-def find_platforms(img: np.ndarray) -> List[Platform]:
+def find_platforms(img: np.ndarray, any_glow: bool = False) -> List[Platform]:
     """隊伍現在站的平台（發暖白色光的那一大塊）。畫面上有兩隊時可能找到兩個。"""
     h, w = img.shape[:2]
     s = h / REF_H
@@ -625,8 +628,8 @@ def find_platforms(img: np.ndarray) -> List[Platform]:
         if _in_hud(cx, cy, w, h):
             continue
         is_hero, side = _identify_hero(img, cx, cy, s)
-        if is_hero:
-            out.append(Platform(cx, cy, int(bw * s), int(bh * s), side))
+        if is_hero or any_glow:       # any_glow：英雄不是顏色規則認得的那組時，給路線比對用（見 MapPlanner._glow_for）
+            out.append(Platform(cx, cy, int(bw * s), int(bh * s), side if is_hero else None))
     out.sort(key=lambda p: (p.x, p.y))
     return out
 
@@ -901,6 +904,7 @@ MOTION_MAX = 0.03      # 相鄰兩輪畫面「變化像素比例」超過這個�
 STAND = (0.50, 0.495)  # 鏡頭跟著隊伍時隊伍平台在畫面上的位置（範圍比例）：9/20 錄製每次行動完都停在 (725, 405)±20（範圍 1450×818）
 CENTER_BOX = (0.15, 0.15)   # 平台離 STAND 這麼近（寬、高的比例）就算「鏡頭正對著它」
 MAX_CENTER_DRAGS = 2        # 一輪搜尋裡最多幾次「把找到的隊伍拖到畫面中間」
+DRAG_GAIN = 1.15            # 拖地圖時內容移動÷手指移動（推算剛行動那隊被拖到哪裡用）
 STILL_MAX = 3               # 連續幾次拖了畫面都沒動就停手（模擬器沒收到拖曳；到地圖邊只會卡一個方向，換方向就會動）
 
 
@@ -1051,6 +1055,7 @@ class MapPlanner:
         self._stones: set = set()                    # 路線：已經試過「先點中間那格空平台」的 (隊, 第幾步)
         self._walk_since: Optional[float] = None     # 路線：點了「空格」的時間（不跳彈窗，鏡頭跟著隊伍動了才算走過去）
         self._fresh_actor: Optional[str] = None      # 路線：剛走完一步的隊（回到總覽時鏡頭對著它）；開自動／拖過地圖就不算
+        self._actor_at: Optional[List[float]] = None  # 剛走完一步那隊現在在畫面上的推算位置（拖地圖時跟著手指位移推算）
         self.route_event: Optional[str] = None       # 路線：規劃器自己確認走完的那一步（空格），給 engine 寫進動作記錄
         self._retry_clicked = False                  # 點了「戰敗後重打」（重打的隊記在 route.retry，存檔）
         self._reset_scan()
@@ -1422,26 +1427,78 @@ class MapPlanner:
 
     # -- 照固定路線走（route.py；10/01 使用者指定） --
     def _route_plats(self, plats: Sequence[Platform], w: int, h: int) -> List[Platform]:
-        """隊伍平台補上「是哪一隊」：顏色認不出來、但這次回到總覽還沒拖過地圖時，畫面正中間那個就是剛走完一步的那隊
-        （鏡頭一律停在剛行動的隊伍上，見 STAND）。連平台都沒找到也一樣，直接當它站在 STAND。"""
+        """隊伍平台是哪一隊——不看英雄長相（11/22：使用者要分享給朋友，每個人的陣容不同；同一天自己換了英雄，
+        顏色規則就把尖帽法師當成左隊）。只靠這幾個跟長相無關的事實：
+          * 隊伍只有兩支，站的平台都會發光；
+          * 鏡頭一定停在剛行動的那隊身上（STAND）：正中間那個是它，畫面上其他有人的平台就是另一隊；
+          * 拖地圖時用手指位移推算它被拖到哪：還在畫面上就認位置最近的，被拖出畫面了，看得到的都是另一隊；
+          * 一輪剛開始兩隊各在起點：左邊那個是左隊。
+        平台沒偵測到也一樣（英雄不是顏色規則認得的那組）：直接當剛行動那隊站在 STAND。
+        顏色規則／英雄樣板給的隊伍，只在這些都用不上的時候（例如重開自動、不知道鏡頭對著誰）才算數。"""
         actor = self._fresh_actor      # 只信「這次開自動之後、剛剛真的走了一步」的隊（重開自動前你可能自己拖過地圖）
         out = list(plats)
-        if actor is None or self._drags:
+        r = self.route
+        if (r is not None and not self._drags and len(out) == 2 and all(r.idx.get(sd, 0) == 0 for sd in SIDES)
+                and {p.side for p in out} != {LEFT, RIGHT}):
+            a, b = sorted(out, key=lambda p: p.x)
+            out = [a._replace(side=LEFT), b._replace(side=RIGHT)]
+        if actor is None:
             return out
-        c = self._centered(out, w, h)
-        if c is not None and c.side is not None and c.side != actor and self._img is not None:
-            # 顏色說是另一隊：英雄樣板也在那裡找到那一隊的英雄才信（9/20 錄製 #106 鏡頭正中真的是另一隊的野蠻人）
-            far = 150 * h / REF_H
-            hero = self._heroes_in(self._img).get(c.side)
-            if hero is not None and ((hero.x - c.x) ** 2 + (hero.y - c.y) ** 2) ** 0.5 <= far:
-                return out
-        if c is not None and c.side != actor:
-            # 11/22：顏色規則會把尖帽法師的棕橘長袍當成「左隊」的膚色，結果把右隊的下一步當成左隊的點了。
-            # 鏡頭停在剛行動的那隊身上，顏色又沒有英雄樣板佐證 → 正中間的平台算剛行動的那隊
-            out = [p._replace(side=actor) if p is c else (p._replace(side=None) if p.side == actor else p) for p in out]
-        elif c is None and not any(p.side == actor for p in out):
-            out.append(Platform(int(STAND[0] * w), int(STAND[1] * h), int(140 * h / REF_H), int(120 * h / REF_H), actor))
-        return out
+        other = other_side(actor)
+        if not self._drags:
+            c = self._centered(out, w, h)
+            if c is not None and c.side == other and self._img is not None:
+                # 顏色說是另一隊、英雄樣板也在那裡找到那一隊的英雄：才信（9/20 錄製 #106 鏡頭正中真的是另一隊的野蠻人）
+                far = 150 * h / REF_H
+                hero = self._heroes_in(self._img).get(other)
+                if hero is not None and ((hero.x - c.x) ** 2 + (hero.y - c.y) ** 2) ** 0.5 <= far:
+                    self._actor_at = None
+                    return out
+            if c is None:
+                mine = [p for p in out if p.side == actor]
+                if mine:
+                    c = min(mine, key=lambda p: (p.x - STAND[0] * w) ** 2 + (p.y - STAND[1] * h) ** 2)
+                else:
+                    c = Platform(int(STAND[0] * w), int(STAND[1] * h), int(140 * h / REF_H), int(120 * h / REF_H), actor)
+                    out.append(c)
+            self._actor_at = [float(c.x), float(c.y)]
+            return [p._replace(side=actor) if p is c else p._replace(side=other) for p in out]
+        if self._actor_at is None:
+            return out
+        ax, ay = self._actor_at
+        if ax < -0.08 * w or ax > 1.08 * w or ay < -0.08 * h or ay > 1.08 * h:
+            return [p._replace(side=other) for p in out]        # 剛行動那隊已被拖出畫面：看得到的都是另一隊
+        tol = (0.12 + 0.04 * self._drags) * w
+        near = [p for p in out if ((p.x - ax) ** 2 + (p.y - ay) ** 2) ** 0.5 <= tol]
+        c = min(near, key=lambda p: (p.x - ax) ** 2 + (p.y - ay) ** 2) if near else None
+        if c is None:
+            return [p._replace(side=other) if p.side != actor else p for p in out]
+        return [p._replace(side=actor) if p is c else p._replace(side=other) for p in out]
+
+    def _glow_for(self, side: str, st, view: "MapView", plats: Sequence[Platform], cands: Sequence["Cand"],
+                  img_shape: Tuple[int, ...]) -> Optional[Tuple[Platform, "RouteOpt", str]]:
+        """找不到 side 這隊（英雄不是顏色規則認得的那組，平台上「有沒有人」都判斷不出來）：看畫面上每個發光平台，
+        前面剛好有路線下一步要的節點（種類＋方向都對）的那個就是它。剛好一個對得上才算，多個就不猜。"""
+        if self._img is None:
+            return None
+        h = img_shape[0]
+        s = h / REF_H
+        known = list(plats)
+        hits = []
+        for g in find_platforms(self._img, any_glow=True):
+            if any(abs(g.x - p.x) <= 60 * s and abs(g.y - p.y) <= 60 * s for p in known):
+                continue
+            if self._actor_at is not None and ((g.x - self._actor_at[0]) ** 2 + (g.y - self._actor_at[1]) ** 2) ** 0.5 <= 120 * s:
+                continue
+            g = g._replace(side=side)
+            loose = [n for n, _ in adjacent_nodes(cands, [g], img_shape)]
+            opts = route_options(view.nodes, known + [g], g, h, extra=loose)
+            if st.kind == WALK:
+                continue
+            o, why = match_route_step(st.kind, st.dir, opts, cands, h)
+            if o is not None:
+                hits.append((g, o, why))
+        return hits[0] if len(hits) == 1 else None
 
     def _team_plat(self, plats: Sequence[Platform], side: str, w: int, h: int) -> Optional[Platform]:
         mine = [p for p in plats if p.side == side]
@@ -1518,6 +1575,17 @@ class MapPlanner:
                 found[sd] = (o, why)
             else:
                 missing[sd] = (p, why)
+        for sd in free:
+            if sd in found or sd in missing or (r.retry == sd):
+                continue
+            st = r.next(sd)
+            g = self._glow_for(sd, st, view, plats, cands, img_shape) if st is not None else None
+            if g is not None:
+                gp, o, why = g
+                plats = list(plats) + [gp]
+                found[sd] = (o, why + "（英雄認不出是哪隊，靠路線下一步對得上）")
+                marks.append((gp.x, gp.y, "隊伍" + SIDE_NAMES[sd][0] + "?", False))
+
         self.extra_overlay = marks
 
         rt = r.retry
@@ -1729,6 +1797,10 @@ class MapPlanner:
             self._edge_note = ""
             self._miss_since = None       # 路線：拖完重新看（拖到中間之後要重新等一段時間才算「真的找不到」）
             self._tracks.clear()          # 拖完鏡頭會動，舊的圖釘位置作廢
+            if self._actor_at is not None:
+                # 地圖內容跟著手指跑（9/24 校準：近處 1.16~1.33 倍、遠處較少；取 1.15）
+                self._actor_at[0] += (plan.x1 - plan.x) * DRAG_GAIN
+                self._actor_at[1] += (plan.y1 - plan.y) * DRAG_GAIN
             self._hero_cache = None
             self._scene_cache = None
             self._no_pin_since = now      # 拖完等一小段再看有沒有圖釘
