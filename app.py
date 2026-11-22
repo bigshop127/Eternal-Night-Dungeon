@@ -521,6 +521,24 @@ class AssistApp(tk.Tk):
         self.dock()
         self.worker.start()
         self._pump_job = self.after(80, self._pump)
+        if "--autostart" in sys.argv:
+            # 啟動就直接開自動（不跳確認框）：給排程／遠端啟動用，例如 `pythonw app.py --autostart`
+            self.after(2500, self._autostart)
+
+    def _autostart(self) -> None:
+        region, err = self.engine.tracker.current()
+        if region is None or len(self.engine.db) == 0 or self._overlaps_region():
+            self._push_log(f"--autostart 沒有開成：{err or '畫面範圍或樣板還沒準備好'}")
+            return
+        with self.lock:
+            self.engine.start_autoplay()
+            # 程式重開接著跑（鏡頭沒人動過）：鏡頭停在路線記錄裡最後行動的那隊身上
+            if self.engine.route.active:
+                self.engine.planner._fresh_actor = self.engine.route.last_actor
+        self.worker.resume()
+        self._sync_auto_note()
+        self._push_log("自動操控開始（--autostart）")
+        self.flash(f"自動操控開始 —— 按 {self.cfg.panic_key} 可隨時停止", 6)
 
     # -- 視窗 --
     def _force_normal_window(self) -> None:

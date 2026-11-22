@@ -337,7 +337,48 @@ def test_adb():
           and eng.planner.memory is not None)
 
 
+def test_live_1122():
+    print("\n11. 11/22 實機跑一輪遇到的情況（英文介面、新英雄、戰敗、陣亡）")
+    from PIL import Image
+    ref = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reference_notes")
+    if not os.path.exists(os.path.join(ref, "35_en_vs_dead_hero_1122.png")):
+        print("  （沒有 11/22 參考畫面，略過）")
+        return
+    ld = lambda f: np.asarray(Image.open(os.path.join(ref, f)).convert("RGB"))  # noqa: E731
+    check("VS 畫面：我方灰色卡（陣亡）認得出 1 張", E.dead_cards(ld("35_en_vs_dead_hero_1122.png"), E.VS_CARDS) == 1)
+    check("復活視窗：復活前 1 張灰卡、按了 Tap to use 之後 0 張",
+          E.dead_cards(ld("36_en_revive_dialog_dead_1122.png"), E.REVIVE_CARDS) == 1
+          and E.dead_cards(ld("37_en_revive_dialog_revived_1122.png"), E.REVIVE_CARDS) == 0)
+    hf = O.HeroFinder.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), "overview_assets", "heroes"))
+    pl = O.MapPlanner(O.NodeClassifier(), hero_finder=hf)
+    plats = pl._scene(ld("34_en_overview_start_1122.png"), 0)[0]
+    check("起點畫面：右上那隊（尖帽法師）認成右隊", any(p.side == R for p in plats), f"{plats}")
+
+    # 戰敗：路線退回那一步、標記重打；重打＝點隊伍腳下那格
+    r = RT.RouteTracker(None)
+    r.idx = {L: 11, R: 7}
+    r.last_actor = R
+    undone = r.undo_last()
+    check("戰敗時剛走完的是治療（第2段右2）→ 不退", undone is None and r.idx[R] == 7, f"{undone}")
+    r.idx = {L: 11, R: 6}
+    r.last_actor = R
+    r.wait = L
+    undone = r.undo_last()
+    check("第2段右1（怪物）打輸 → 退回右1", undone is not None and r.idx[R] == 5, f"{undone} {r.idx}")
+    r.set_retry(R)
+    img = ld("39_en_after_defeat_team_on_monster_1122.jpg")
+    pl2 = O.MapPlanner(O.NodeClassifier(), hero_finder=hf, route=r)
+    pl2.observe(img, 0.0)
+    plan = pl2.decide(pl2.observe(img, 0.2), img.shape, 0.3)
+    check("重打：點右隊腳下那格（不是去找正前方）", plan.kind == "click" and plan.tag == "retry" and abs(plan.y - 300) < 40,
+          f"{plan.kind} {plan.reason} {(plan.x, plan.y)}")
+    pl2.commit(plan, img.shape, 0.3, R)
+    pl2.left_overview()
+    check("重打點下去、離開總覽 → 不再標記重打", r.retry is None)
+
+
 def main():
+    test_live_1122()
     test_geometry()
     test_fake_switch()
     test_memory()

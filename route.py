@@ -96,6 +96,7 @@ class RouteTracker:
         self.pending: Optional[Tuple[str, int]] = None   # 點了、還沒確認有反應的那一步 (隊, 第幾步)
         self.updated: Optional[str] = None          # 上次進度改變的時間（ISO 字串）
         self.last_actor: Optional[str] = None       # 最近一次真的走了一步的隊（回到總覽時鏡頭會對著它）
+        self.retry: Optional[str] = None            # 剛打輸、要重打的隊（停在那隻怪物的格子上；11/22）
 
     # -- 進度 --
     def next(self, side: str) -> Optional[Step]:
@@ -160,6 +161,27 @@ class RouteTracker:
         self.save()
         return side, st
 
+    def undo_last(self) -> Optional[Tuple[str, Step]]:
+        """戰鬥打輸（11/22 新英雄第一次跑就輸了一場）：剛剛算走完的那一步其實沒過，退回去（下次重打同一個）。
+        只退「最近一次走完的那隊」的最後一步，而且只有那一步是要打的（怪物／寶箱）才退。回傳退掉的 (隊, 那一步)。"""
+        side = self.last_actor
+        if side is None or self.idx.get(side, 0) <= 0:
+            return None
+        i = self.idx[side] - 1
+        st = self.route[side][i]
+        if st.kind not in (O.ENEMY, O.CHEST):
+            return None
+        self.idx[side] = i
+        self.pending = None
+        self._touch()
+        self.save()
+        return side, st
+
+    def set_retry(self, side: Optional[str]) -> None:
+        if self.retry != side:
+            self.retry = side
+            self.save()
+
     def new_stage(self) -> None:
         """遊戲進了下一階段（提示框／五選一／獎勵輪盤）：不再有誰在等誰（第 2 段左隊那個裝置不會跳提示框，所以等待不會被它清掉）。"""
         if self.wait is not None and all(self.stage_done(sd, self._wait_stage()) for sd in O.SIDES):
@@ -177,6 +199,7 @@ class RouteTracker:
         self.wait = None
         self.pending = None
         self.last_actor = None
+        self.retry = None
         self._touch()
         self.save()
 
@@ -245,7 +268,7 @@ class RouteTracker:
         if not self.path:
             return
         data = {"version": 1, "left": self.idx[O.LEFT], "right": self.idx[O.RIGHT], "wait": self.wait,
-                "updated": self.updated, "last_actor": self.last_actor}
+                "updated": self.updated, "last_actor": self.last_actor, "retry": self.retry}
         try:
             tmp = self.path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
@@ -275,6 +298,8 @@ class RouteTracker:
         r.wait = w if w in O.SIDES else None
         la = data.get("last_actor")
         r.last_actor = la if la in O.SIDES else None
+        rt = data.get("retry")
+        r.retry = rt if rt in O.SIDES else None
         r.updated = data.get("updated") if isinstance(data.get("updated"), str) else None
         return r
 

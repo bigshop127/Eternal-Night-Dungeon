@@ -404,7 +404,10 @@ def _ncc(img: np.ndarray, t: np.ndarray) -> np.ndarray:
         num += np.fft.irfft2(F * np.conj(T), s=(Hp, Wp))[:H - h + 1, :W - w + 1]
         s1 = _box_sum(img[..., c], h, w)
         var += _box_sum(img[..., c] ** 2, h, w) - s1 * s1 / n
-    return num / (np.sqrt(np.maximum(var, 1e-6) * tn) + 1e-6)
+    out = num / (np.sqrt(np.maximum(var, 1e-6) * tn) + 1e-6)
+    # 視窗內幾乎沒有變化（純色區塊）時，分子分母都是浮點雜訊，比值會亂跳（11/22：新英雄樣板在純色畫面上給出 0.60）→ 當 0
+    out[var < 4.0 * n] = 0.0
+    return out
 
 
 class HeroFinder:
@@ -417,8 +420,11 @@ class HeroFinder:
 
     DOWN = 2
 
-    def __init__(self, templates: Optional[Dict[str, np.ndarray]] = None) -> None:
-        self.templates: Dict[str, np.ndarray] = dict(templates or {})
+    def __init__(self, templates: Optional[Dict[str, object]] = None) -> None:
+        # 每隊可以有好幾張樣板（11/22：使用者換了英雄——左隊換成拿雙環刃的女英雄、右隊換成尖帽法師，
+        # left_2.png／right_2.png；舊的野蠻人／法師樣板留著，換回去也認得）
+        self.templates: Dict[str, List[np.ndarray]] = {
+            k: (list(v) if isinstance(v, (list, tuple)) else [v]) for k, v in (templates or {}).items()}
 
     @property
     def ready(self) -> bool:
@@ -426,11 +432,14 @@ class HeroFinder:
 
     @classmethod
     def load(cls, dir_path: str) -> "HeroFinder":
-        t: Dict[str, np.ndarray] = {}
-        for side in SIDES:
-            path = os.path.join(dir_path, f"{side}.png")
-            if os.path.exists(path):
-                t[side] = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+        t: Dict[str, List[np.ndarray]] = {}
+        if os.path.isdir(dir_path):
+            names = sorted(os.listdir(dir_path))
+            for side in SIDES:
+                for f in names:
+                    if f.lower().endswith(".png") and (f[:-4] == side or f.startswith(side + "_")):
+                        t.setdefault(side, []).append(np.asarray(Image.open(os.path.join(dir_path, f)).convert("RGB"),
+                                                                 dtype=np.uint8))
         return cls(t)
 
     def find(self, img: np.ndarray) -> Dict[str, Hero]:
@@ -441,9 +450,9 @@ class HeroFinder:
                            dtype=np.float32)
         base = img.shape[0] / HERO_REF_H
         best: Dict[str, Tuple[float, int, int]] = {}
-        for side, tmpl in self.templates.items():
+        for side, tmpls in self.templates.items():
             top = (-1.0, 0, 0)
-            for sc in HERO_SCALES:
+            for tmpl, sc in ((t, sc) for t in tmpls for sc in HERO_SCALES):
                 th = max(8, int(round(tmpl.shape[0] * sc * base / d)))
                 tw = max(8, int(round(tmpl.shape[1] * sc * base / d)))
                 if th >= small.shape[0] or tw >= small.shape[1]:
@@ -1043,6 +1052,7 @@ class MapPlanner:
         self._walk_since: Optional[float] = None     # 路線：點了「空格」的時間（不跳彈窗，鏡頭跟著隊伍動了才算走過去）
         self._fresh_actor: Optional[str] = None      # 路線：剛走完一步的隊（回到總覽時鏡頭對著它）；開自動／拖過地圖就不算
         self.route_event: Optional[str] = None       # 路線：規劃器自己確認走完的那一步（空格），給 engine 寫進動作記錄
+        self._retry_clicked = False                  # 點了「戰敗後重打」（重打的隊記在 route.retry，存檔）
         self._reset_scan()
 
     def _reset_scan(self) -> None:
@@ -1088,6 +1098,8 @@ class MapPlanner:
         各隊的戰鬥計數、還有「哪一隊在等另一隊」要跨過總覽保留（它們就是為了跨好幾輪總覽累積的）。"""
         if self.route is not None:
             self._remember_switch(self.route.last_actor)
+        if self._retry_clicked and self.route is not None:     # 點了重打、畫面離開總覽＝重打開始了
+            self.route.set_retry(None)
         fights, pending, stuck, check = self._fights, self._pending, self._stuck_side, self._stuck_check
         self.reset()
         self._fights, self._pending, self._stuck_side, self._stuck_check = fights, pending, stuck, check
@@ -1417,8 +1429,16 @@ class MapPlanner:
         if actor is None or self._drags:
             return out
         c = self._centered(out, w, h)
-        if c is not None and c.side is None:
-            out = [p._replace(side=actor) if p is c else p for p in out]
+        if c is not None and c.side is not None and c.side != actor and self._img is not None:
+            # 顏色說是另一隊：英雄樣板也在那裡找到那一隊的英雄才信（9/20 錄製 #106 鏡頭正中真的是另一隊的野蠻人）
+            far = 150 * h / REF_H
+            hero = self._heroes_in(self._img).get(c.side)
+            if hero is not None and ((hero.x - c.x) ** 2 + (hero.y - c.y) ** 2) ** 0.5 <= far:
+                return out
+        if c is not None and c.side != actor:
+            # 11/22：顏色規則會把尖帽法師的棕橘長袍當成「左隊」的膚色，結果把右隊的下一步當成左隊的點了。
+            # 鏡頭停在剛行動的那隊身上，顏色又沒有英雄樣板佐證 → 正中間的平台算剛行動的那隊
+            out = [p._replace(side=actor) if p is c else (p._replace(side=None) if p.side == actor else p) for p in out]
         elif c is None and not any(p.side == actor for p in out):
             out.append(Platform(int(STAND[0] * w), int(STAND[1] * h), int(140 * h / REF_H), int(120 * h / REF_H), actor))
         return out
@@ -1458,7 +1478,24 @@ class MapPlanner:
             return MapPlan("wait", "路線：兩隊都還不能走（" + "；".join(r.describe_side(sd) for sd in SIDES) + "）")
         plats, cands = self._scene(self._img, now)
         plats = self._route_plats(plats, w, h)
-        loose = [n for n, _ in adjacent_nodes(cands, plats, img_shape)]     # 沒圖釘的節點（遊戲有時不顯示圖釘）
+        if r.retry in free and not self._drags:
+            # 剛打輸、鏡頭還沒拖過：遊戲鏡頭停在剛戰鬥的那隊身上，畫面正中間那個平台就是它（擋在前面的怪物會讓顏色判錯隊）
+            c = self._centered(plats, w, h)
+            if c is not None and c.side != r.retry:
+                plats = [p._replace(side=r.retry) if p is c else (p._replace(side=None) if p.side == r.retry else p)
+                         for p in plats]
+        if r.retry in free and not any(p.side == r.retry for p in plats):
+            # 戰敗要重打的隊站在那隻怪物的格子上，怪物擋在英雄前面，顏色／樣板都認不出是誰（11/22 實測：
+            # 右隊被紅盔甲斯巴達擋住，連拖 23 次都說找不到）。畫面上只有一個認不出的隊伍平台＝就是它
+            unknown = [p for p in plats if p.side is None]
+            if not unknown and not r.can_act(other_side(r.retry)):
+                # 怪物的紅盔甲還會被顏色規則當成「左隊」。另一隊此刻不能走（停在觸發裝置上等），它腳下有紫色光柱；
+                # 腳下沒有裝置光柱的那個平台才是要重打的隊
+                beams = [c for c in cands if c.kind == DEVICE]
+                unknown = [p for p in plats if not any(abs(c.x - p.x) <= 70 * s and abs(c.y - p.y) <= 90 * s for c in beams)]
+            if len(unknown) == 1:
+                plats = [p._replace(side=r.retry) if p is unknown[0] else p for p in plats]
+        loose =[n for n, _ in adjacent_nodes(cands, plats, img_shape)]     # 沒圖釘的節點（遊戲有時不顯示圖釘）
         found: Dict[str, Tuple[RouteOpt, str]] = {}
         missing: Dict[str, Tuple[Platform, str]] = {}
         marks: List[tuple] = [(p.x, p.y, "隊伍" + (SIDE_NAMES[p.side][0] if p.side else "?"), False) for p in plats]
@@ -1482,6 +1519,19 @@ class MapPlanner:
             else:
                 missing[sd] = (p, why)
         self.extra_overlay = marks
+
+        rt = r.retry
+        if rt in free:
+            p = self._team_plat(plats, rt, w, h)
+            st = r.next(rt)
+            if p is not None and st is not None and st.kind in (ENEMY, CHEST):
+                x, y = p.x, p.y - int(25 * s)
+                n = Node(x, y, stand_in_pin(x, y, h), st.kind, 0.0, True)
+                a = self._attempt(n, s)
+                if a is None or a[2] < self.max_attempts:
+                    return MapPlan("click", f"路線 {st.name(rt)}：剛剛打輸了，點{SIDE_NAMES[rt]}腳下那格重打{st.what()}",
+                                   x, y, node=n, side=rt, route=(rt, r.idx.get(rt, 0)), tag="retry")
+                r.set_retry(None)               # 點腳下兩次都沒反應：怪物不在那格，照一般找法（正前方）
 
         if found:
             rank = {k: i for i, k in enumerate(self.priority)}
@@ -1563,11 +1613,13 @@ class MapPlanner:
             return self._scene_cache[1], self._scene_cache[2]
         plats = find_platforms(img)
         if any(p.side is None for p in plats):
+            # 顏色認不出的才用英雄樣板補（11/22 實測：鏡頭拉遠時英雄很小，樣板分數低、還會被別隊的樣板誤配；
+            # 顏色規則對換上的雙環刃女英雄仍判得出「左隊」）。不用「左右位置」補：站著怪物的發亮平台會被當成另一隊
             heroes = self._heroes_in(img)
             far = 150 * img.shape[0] / REF_H
             fixed = []
             for p in plats:
-                if p.side is None and heroes:
+                if heroes and p.side is None:
                     near = min(heroes.values(), key=lambda hh: (hh.x - p.x) ** 2 + (hh.y - p.y) ** 2)
                     if ((near.x - p.x) ** 2 + (near.y - p.y) ** 2) ** 0.5 <= far:
                         p = p._replace(side=near.side)
@@ -1636,6 +1688,8 @@ class MapPlanner:
             nxt = self.route.next(plan.route[0])
             if nxt is not None and nxt.kind == WALK:
                 self._walk_since = now          # 空格不跳彈窗：observe 看到鏡頭跟著動了才算走過去
+        if plan.kind == "click" and plan.tag == "retry":
+            self._retry_clicked = True
         if plan.kind == "click" and plan.node is not None:
             if plan.node.kind == HEAL:
                 self._fights = {LEFT: 0, RIGHT: 0}    # 治療一點下去兩隊的計數歸零（重新累積）

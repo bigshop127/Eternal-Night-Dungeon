@@ -46,6 +46,33 @@ SWITCH_PATH = os.path.join(APP_DIR, "switch_memory.json")   # 換邊記憶：每
 
 _BAD_LABEL_CHARS = set('\\/:*?"<>|')
 
+# 11/22 使用者：隊伍裡有英雄陣亡（卡片變灰）時 Challenge 按了沒反應 → 先點右下「Heart of Norheim」→ 視窗中間「Tap to use」復活
+VS_LABEL = "VS"
+REVIVE_LABEL = "復活視窗"
+VS_CARDS = ((0.233, 0.282, 0.288, 0.382), (0.319, 0.282, 0.373, 0.382),     # VS 畫面我方四張英雄卡的頭像（範圍比例）
+            (0.233, 0.483, 0.288, 0.583), (0.319, 0.483, 0.373, 0.583))
+REVIVE_CARDS = tuple((x0, 0.261, x0 + 0.058, 0.358) for x0 in (0.264, 0.351, 0.438, 0.525))   # 復活視窗裡的英雄卡
+DEAD_SAT = 10.0            # 頭像平均色彩飽和度（最大−最小色版）低於這個＝灰色＝陣亡（實測陣亡 2.2、活著 ≥ 38）
+VS_CLOSE = (0.962, 0.154)  # VS 畫面右上角 ✕
+HEART_BTN = (0.922, 0.903)     # 總覽右下「Heart of Norheim」
+REVIVE_USE = (0.521, 0.781)    # 復活視窗中間的愛心「Tap to use」
+REVIVE_CLOSE = (0.785, 0.134)  # 復活視窗右上角 ✕
+
+
+def dead_cards(img: np.ndarray, boxes) -> int:
+    """這幾張英雄卡裡有幾張是灰的（陣亡）。"""
+    h, w = img.shape[:2]
+    n = 0
+    for x0, y0, x1, y1 in boxes:
+        p = img[int(y0 * h):int(y1 * h), int(x0 * w):int(x1 * w)].astype(np.int16)
+        if p.size and float((p.max(axis=2) - p.min(axis=2)).mean()) < DEAD_SAT:
+            n += 1
+    return n
+
+
+DONE_LABEL = "挑戰完成"      # 11/22：整輪打完的「Challenge Complete」畫面，點掉之後自動停手
+DEFEAT_LABEL = "戰敗"         # 11/22：戰鬥打輸的結算畫面（點 Quit）；路線退回那一步重打，同一步連輸 MAX_DEFEATS 次就停手
+MAX_DEFEATS = 3
 VICTORY_LABEL = "VICTORY"    # 勝利結算畫面的名稱（tools/seed_templates.py 的 SPEC）；看到它就替剛點節點的那一隊記一場戰鬥
 # 進入下一階段的過場畫面（觸發裝置 → 提示框確定 → 獎勵輪盤 → 五選一）：看到它們＝兩隊都有新路可走，
 # 規劃器不必再記得「哪一隊在等另一隊」（見 MapPlanner.new_stage）
@@ -330,6 +357,10 @@ class Engine:
         self.last_image: Optional[np.ndarray] = None
         self.region: Optional[V.Region] = None
         self.route = R.RouteTracker.load(ROUTE_PATH, enabled=bool(cfg.route_enabled))
+        self._defeats: Dict[Tuple[str, int], int] = {}   # 路線上每一步打輸幾次
+        self.need_revive = False      # VS 看到陣亡英雄、關掉了：回到總覽要先用 Heart of Norheim 復活
+        self._reload_at = 0.0
+        self._file_stamp = self._stamp()
         self._route_check = False     # 剛開自動：第一個總覽畫面要看看是不是新的一輪（起始畫面）
         self.rebuild()
 
@@ -396,6 +427,8 @@ class Engine:
         self._acted_at = 0.0
         self._retry = 0
         self._note = ""
+        self._vs_dead_prev = False       # 已經處理過「VS 畫面有陣亡英雄」（同一個 VS 畫面只處理一次）
+        self._defeat_label_prev = False  # 上一個穩定畫面是不是戰敗（戰敗畫面會連續好幾輪，只處理一次）
         self._victory_note = ""       # 勝利畫面記的戰鬥場數；跟同一步的「點退出」動作記錄合併，不能被蓋掉
         self._route_note = ""         # 路線走完一步／從頭開始之類的記錄，同樣跟這一步的動作記錄合併
         self._in_map = False
@@ -479,8 +512,31 @@ class Engine:
         self.rules.save()
         self._reset_flow()
 
+    @staticmethod
+    def _stamp() -> tuple:
+        out = []
+        for p in (os.path.join(TEMPLATES_DIR, "index.json"), RULES_PATH):
+            try:
+                out.append(os.path.getmtime(p))
+            except OSError:
+                out.append(None)
+        return tuple(out)
+
+    def _maybe_reload(self) -> None:
+        """樣板庫或規則檔在外面被改了（例如另外用工具教了新畫面）就重新載入，不用重開輔助器。每 2 秒看一次。"""
+        now = time.monotonic()
+        if now - self._reload_at < 2.0:
+            return
+        self._reload_at = now
+        st = self._stamp()
+        if st != self._file_stamp:
+            self._file_stamp = st
+            self.db = V.StateDB.load(TEMPLATES_DIR, self.cfg.tolerance, self.cfg.min_margin)
+            self.rules = RuleBook.load()
+
     # -- 主迴圈的一步 --
     def step(self) -> Status:
+        self._maybe_reload()
         if self.autoplay and C.panic_pressed(self.cfg.panic_key):
             self.stop_autoplay()
             return self._status("stopped", f"偵測到 {self.cfg.panic_key}，自動操控已停止。")
@@ -534,6 +590,11 @@ class Engine:
         if self._confirm_n < self.cfg.stable_reads:
             return self._status("settling", "畫面變動中…", **common)
 
+        if self.autoplay:
+            special = self._revive_flow(m.label, rule, region, img)
+            if special is not None:
+                return self._finish(special, common)
+
         if m.label in STAGE_LABELS:
             self.planner.new_stage()
             self.route.new_stage()
@@ -554,6 +615,15 @@ class Engine:
                 else:
                     self._route_note = (f"路線：{st.name(side)}（{st.what()}）有反應，算走完；"
                                         f"{self.route.describe_side(O.LEFT)}；{self.route.describe_side(O.RIGHT)}")
+        if m.label == DEFEAT_LABEL and not self._defeat_label_prev and self.autoplay:
+            self._defeat_label_prev = True
+            failure = self._on_defeat()
+            if failure is not None:
+                self._act(m.label, rule, region)          # 先按 Quit 離開戰敗畫面再停手
+                self.stop_autoplay()
+                return failure
+        elif m.label != DEFEAT_LABEL:
+            self._defeat_label_prev = False
         if m.label == VICTORY_LABEL:
             side = self.planner.note_victory()
             if side:
@@ -572,6 +642,82 @@ class Engine:
         if rnote:
             note = f"{rnote}；{note}" if note else rnote
         return self._status("ok", "", acted=note, **common)
+
+    def _finish(self, special, common: dict) -> Status:
+        if isinstance(special, Status):
+            return special
+        note, self._note = self._note, ""
+        return self._status("ok", "", acted=note, **common)
+
+    def _revive_flow(self, label: str, rule: Optional[dict], region: V.Region, img: np.ndarray):
+        """陣亡英雄的處理（使用者 11/22 教的步驟）。回 None＝不關這裡的事、照一般流程；回 True／Status＝這一輪已處理。"""
+        if label != VS_LABEL:
+            self._vs_dead_prev = False
+        if label == VS_LABEL and dead_cards(img, VS_CARDS):
+            if not self._vs_dead_prev:
+                self._vs_dead_prev = True
+                self.need_revive = True
+                undone = self.route.undo_last() if self.route.active else None
+                if undone is not None:
+                    self.route.set_retry(undone[0])
+                self._planner_retry_reset()
+                self._victory_note = (f"VS 畫面有 {dead_cards(img, VS_CARDS)} 位英雄陣亡（灰色），先關掉去用 Heart of Norheim 復活"
+                                      + (f"；路線退回 {undone[1].name(undone[0])} 等一下重打" if undone else ""))
+            fail = self._act(label, {"action": "click", "x": VS_CLOSE[0], "y": VS_CLOSE[1]}, region)
+            if self._victory_note:
+                self._note = f"{self._victory_note}；{self._note}"
+                self._victory_note = ""
+            return fail or True
+        if label == REVIVE_LABEL:
+            dead = dead_cards(img, REVIVE_CARDS)
+            if dead:
+                fail = self._act(label, {"action": "click", "x": REVIVE_USE[0], "y": REVIVE_USE[1]}, region)
+                if self._note:
+                    self._note = f"復活視窗：{dead} 位陣亡，點 Tap to use；{self._note}"
+                return fail or True
+            self.need_revive = False
+            fail = self._act(label, {"action": "click", "x": REVIVE_CLOSE[0], "y": REVIVE_CLOSE[1]}, region)
+            if self._note:
+                self._note = f"英雄都復活了，關掉復活視窗；{self._note}"
+            return fail or True
+        if label == DONE_LABEL and rule is not None and rule["action"] == "click":
+            fail = self._act(label, rule, region)
+            if fail is not None:
+                return fail
+            if self._note:          # 點下去了：這一輪地城打完，自動停手
+                note, self._note = self._note, ""
+                self.stop_autoplay()
+                return self._status("stopped", f"這一輪永夜迷城打完了（Challenge Complete），自動操控已停止。「{label}」→ {note.split('→')[-1].strip()}",
+                                    label=label, acted=f"「{label}」→ {note.split('→')[-1].strip()}；這一輪打完了，自動停止")
+            return True
+        if self.need_revive and rule is not None and rule["action"] == "map":
+            fail = self._act(label, {"action": "click", "x": HEART_BTN[0], "y": HEART_BTN[1]}, region)
+            if self._note:
+                self._note = f"有英雄陣亡：點右下 Heart of Norheim；{self._note}"
+            return fail or True
+        return None
+
+    def _planner_retry_reset(self) -> None:
+        self.planner._retry_clicked = False
+
+    def _on_defeat(self) -> Optional[Status]:
+        """打輸了：這一場不算那隊打過、路線退回那一步（下次回到總覽重打同一個）；同一步連輸 MAX_DEFEATS 次就停手。"""
+        self.planner._pending = None
+        undone = self.route.undo_last() if self.route.active else None
+        if undone is None:
+            self._victory_note = "戰鬥打輸了（不在路線上），回總覽照規則繼續"
+            return None
+        side, st = undone
+        self.route.set_retry(side)
+        self.planner._retry_clicked = False
+        key = (side, self.route.idx[side])
+        self._defeats[key] = self._defeats.get(key, 0) + 1
+        n = self._defeats[key]
+        if n >= MAX_DEFEATS:
+            return self._status("stopped", f"路線 {st.name(side)}（{st.what()}）連續打輸 {n} 次，先停下來——"
+                                           f"隊伍可能太弱或血不夠，請你看一下（換陣容／補血）再開自動。")
+        self._victory_note = f"戰鬥打輸了：路線退回 {st.name(side)}（{st.what()}），回總覽重打一次（第 {n} 次輸）"
+        return None
 
     def _step_map(self, region: V.Region, img: np.ndarray, now: float, common: dict) -> Status:
         st = self._step_map_inner(region, img, now, common)
