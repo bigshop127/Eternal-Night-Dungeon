@@ -666,6 +666,48 @@ def test_full_route():
           f"{heals}")
 
 
+def test_snapback():
+    print("== 6. 換邊拖完鏡頭又跳回剛行動那隊（11/24、11/22 第1段左7 裝置後的真實畫面）")
+    from PIL import Image
+    clf = O.NodeClassifier.load(os.path.join(HERE, "overview_assets", "nodes"))
+    hf = O.HeroFinder.load(os.path.join(HERE, "overview_assets", "heroes"))
+    for before, after in (("42_snapback_before_drag_1124.jpg", "43_snapback_camera_back_on_left_1124.jpg"),
+                          ("44_snapback_before_drag_1122.jpg", "45_snapback_camera_back_1122.jpg")):
+        a = np.asarray(Image.open(os.path.join(HERE, "reference_notes", before)).convert("RGB"))
+        b = np.asarray(Image.open(os.path.join(HERE, "reference_notes", after)).convert("RGB"))
+        r = RT.RouteTracker(None)
+        r.idx = {L: 7, R: 0}
+        r.last_actor = L
+        pl = O.MapPlanner(clf, hero_finder=hf, route=r, switch_scale=1.75)
+        pl._fresh_actor = L
+        pl.observe(a, 0.0)
+        p = pl.decide(pl.observe(a, 0.15), a.shape, 0.2)
+        check(f"{before}：換邊第一下大步拖", p.kind == "drag", f"{p.kind} {p.reason}")
+        pl.commit(p, a.shape, 0.2, p.side)
+        kinds = []
+        t = 3.0
+        for _ in range(6):
+            p = pl.decide(pl.observe(b, t), b.shape, t + 0.1)
+            kinds.append(p.kind)
+            if p.kind != "wait":
+                break
+            t += 2.0
+        check(f"{after}：不停手、認出鏡頭跳回左隊，重新從左隊大步找右隊",
+              "stop" not in kinds and p.kind == "drag" and pl._fresh_actor == L and pl.drags == 0,
+              f"{kinds} {p.reason}")
+        # 第二次又一樣（真的找不到）：照舊停手叫人，不會無限重來
+        pl.commit(p, b.shape, t + 0.1, p.side)
+        kinds = []
+        for _ in range(8):
+            t += 2.0
+            p = pl.decide(pl.observe(b, t), b.shape, t + 0.1)
+            kinds.append(p.kind)
+            if p.kind != "wait":
+                break
+        check(f"{after}：同一次總覽第二次又跳回：不再重來（停手或照走法繼續拖）",
+              pl._reanchor_n == 1 and p.kind in ("stop", "drag"), f"{kinds} {p.kind} {p.reason}")
+
+
 def main():
     try:
         test_tracker()
@@ -673,6 +715,7 @@ def main():
         test_planner()
         test_engine()
         test_full_route()
+        test_snapback()
     finally:
         shutil.rmtree(SANDBOX, ignore_errors=True)
     print()

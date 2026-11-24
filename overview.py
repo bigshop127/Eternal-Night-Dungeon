@@ -904,6 +904,7 @@ MOTION_MAX = 0.03      # 相鄰兩輪畫面「變化像素比例」超過這個�
 STAND = (0.50, 0.495)  # 鏡頭跟著隊伍時隊伍平台在畫面上的位置（範圍比例）：9/20 錄製每次行動完都停在 (725, 405)±20（範圍 1450×818）
 CENTER_BOX = (0.15, 0.15)   # 平台離 STAND 這麼近（寬、高的比例）就算「鏡頭正對著它」
 MAX_CENTER_DRAGS = 2        # 一輪搜尋裡最多幾次「把找到的隊伍拖到畫面中間」
+MAX_REANCHOR = 1            # 一次總覽裡最多幾次「拖完鏡頭又跳回剛行動那隊 → 重新從它開始找」（11/24）
 DRAG_GAIN = 1.15            # 拖地圖時內容移動÷手指移動（推算剛行動那隊被拖到哪裡用）
 STILL_MAX = 3               # 連續幾次拖了畫面都沒動就停手（模擬器沒收到拖曳；到地圖邊只會卡一個方向，換方向就會動）
 
@@ -1058,6 +1059,7 @@ class MapPlanner:
         self._actor_at: Optional[List[float]] = None  # 剛走完一步那隊現在在畫面上的推算位置（拖地圖時跟著手指位移推算）
         self.route_event: Optional[str] = None       # 路線：規劃器自己確認走完的那一步（空格），給 engine 寫進動作記錄
         self._retry_clicked = False                  # 點了「戰敗後重打」（重打的隊記在 route.retry，存檔）
+        self._reanchor_n = 0                         # 這次總覽「鏡頭跳回剛行動那隊、重新找」做過幾次（_snapped_back）
         self._reset_scan()
 
     def _reset_scan(self) -> None:
@@ -1534,6 +1536,7 @@ class MapPlanner:
         if not free:
             return MapPlan("wait", "路線：兩隊都還不能走（" + "；".join(r.describe_side(sd) for sd in SIDES) + "）")
         plats, cands = self._scene(self._img, now)
+        raw = {(p.x, p.y): p.side for p in plats}     # 顏色／英雄樣板原本說的隊（_snapped_back 用）
         plats = self._route_plats(plats, w, h)
         if r.retry in free and not self._drags:
             # 剛打輸、鏡頭還沒拖過：遊戲鏡頭停在剛戰鬥的那隊身上，畫面正中間那個平台就是它（擋在前面的怪物會讓顏色判錯隊）
@@ -1601,6 +1604,10 @@ class MapPlanner:
                                    x, y, node=n, side=rt, route=(rt, r.idx.get(rt, 0)), tag="retry")
                 r.set_retry(None)               # 點腳下兩次都沒反應：怪物不在那格，照一般找法（正前方）
 
+        snap = self._snapped_back(plats, raw, found, missing, w, h)
+        if snap is not None:
+            return snap
+
         if found:
             rank = {k: i for i, k in enumerate(self.priority)}
             side = min(found, key=lambda sd: (rank.get(r.next(sd).kind, 99), found[sd][0].node.pin.bottom))
@@ -1640,6 +1647,46 @@ class MapPlanner:
             target = other_side(self._fresh_actor) if self._fresh_actor else None
         need = "、".join(r.describe_side(sd) for sd in free)
         return self._scan(plats, w, h, f"（路線：{need}）", target=target)
+
+    def _snapped_back(self, plats: Sequence[Platform], raw: Dict[Tuple[int, int], Optional[str]],
+                      found: Dict[str, tuple], missing: Dict[str, tuple], w: int, h: int) -> Optional[MapPlan]:
+        """拖完地圖，鏡頭又被遊戲拉回剛行動那隊（11/24 實測：第1段左7 點完裝置、換邊第一下大步拖之後，
+        遊戲把鏡頭重新對準野蠻人，拖曳等於白拖；推算位置以為它被拖出畫面，就把它當成右隊，找不到「右1」停手。
+        11/22 同一個地方也停過）。
+
+        跡象：拖過地圖之後，要找的那隊「正好站在畫面正中間」（只有遊戲自己會把鏡頭對準隊伍），而且
+          * 顏色／英雄樣板原本就說它是剛行動那隊（＋英雄樣板在它身上也找到那隊的英雄，避免新陣容顏色認反）；或
+          * 它前面根本對不上要找那隊的路線下一步，顏色也沒說它是要找的那隊。
+        就當成鏡頭跳回去了：從剛行動那隊重新開始找（一次總覽最多 MAX_REANCHOR 次，第二次照舊停手叫人）。"""
+        actor = self._fresh_actor
+        if not self._drags or actor is None or self._reanchor_n >= MAX_REANCHOR or self.route is None:
+            return None
+        far = 150 * h / REF_H
+        for sd in [x for x in SIDES if x in found or x in missing]:
+            if sd == actor:
+                continue
+            p = self._team_plat(plats, sd, w, h)
+            if p is None or not self._is_centered(p, w, h):
+                continue
+            said = raw.get((p.x, p.y))
+            snapped = False
+            if sd in missing and said != sd:
+                snapped = True
+            elif said == actor and self._img is not None:
+                hero = self._heroes_in(self._img).get(actor)
+                snapped = hero is not None and ((hero.x - p.x) ** 2 + (hero.y - p.y) ** 2) ** 0.5 <= far
+            if not snapped:
+                continue
+            self._reanchor_n += 1
+            self._reset_scan()
+            self._actor_at = None
+            self._miss_since = None
+            self._tracks.clear()
+            self._scene_cache = None
+            self._hero_cache = None
+            return MapPlan("wait", f"拖完地圖鏡頭又跳回{SIDE_NAMES[actor]}（遊戲把剛剛的拖曳蓋掉了），"
+                                   f"從{SIDE_NAMES[actor]}重新找{SIDE_NAMES[sd]}")
+        return None
 
     def _walk_option(self, opts: Sequence[RouteOpt], p: Platform, d: str, img_h: int) -> Tuple[RouteOpt, str]:
         """路線的「空格」：那個方向一格遠的平台。有圖釘（9/20 錄製那次有）就點圖釘那格，不管分類器說它是什麼；
