@@ -708,6 +708,74 @@ def test_snapback():
               pl._reanchor_n == 1 and p.kind in ("stop", "drag"), f"{kinds} {p.kind} {p.reason}")
 
 
+def synth_info():
+    img = synth_overview()
+    img[120:560, 380:820] = (200, 170, 240)    # 紫色資訊框（沒有挑戰鈕），跟前往彈窗分得開
+    return img
+
+
+def test_unreachable():
+    print("== 7. 點到兩隊都走不到的節點（11/24：只跳守衛者資訊、沒有挑戰鈕）")
+    shape = (H, W, 3)
+    pc = plat(*STAND, R)
+    # 規劃器：猜出來的隊（發光平台）跟確定的隊都找到時，先點確定的
+    r = RT.RouteTracker(None)
+    r.idx = {L: 16, R: 18}                 # 第4段 左1 正前的怪物／右6 右前的怪物（11/24 23:32:51 的情況）
+    rx, ry = vec(pc, "R")
+    pl = planner_with(r, Scene([pc]))
+    pl._fresh_actor = R
+    gp = plat(250, 330, L)
+    gx, gy = vec(gp, "F")
+    gn = node(gx, gy, O.ENEMY)
+    pl._glow_for = lambda sd, st, v, plats, cands, shp: (gp, O.RouteOpt(gn, 90.0, 200.0), "") if sd == L else None
+    v = view([node(rx, ry, O.ENEMY), gn])
+    p = pl.decide(v, shape, 0.0)
+    check("右隊確定、左隊只是猜的：先點右隊右前的怪物", p.kind == "click" and p.route == (R, 18) and (p.x, p.y) == (rx, ry),
+          f"{p.kind} {p.route} {p.reason}")
+    # 規劃器：點了、跳資訊 → unreachable → 那一步不算、那格不再點
+    pl = planner_with(r, Scene([pc]))
+    pl._fresh_actor = R
+    v = view([node(rx, ry, O.ENEMY)])
+    p = pl.decide(v, shape, 0.0)
+    pl.commit(p, shape, 0.0, p.side)
+    check("點下去：待確認 (右隊, 18)", r.pending == (R, 18))
+    pl.unreachable()
+    check("走不到：待確認作廢", r.pending is None)
+    p = pl.decide(v, shape, 2.0)
+    check("同一個畫面不再點那格", not (p.kind == "click" and (p.x, p.y) == (rx, ry)), f"{p.kind} {p.reason}")
+    pl.commit(O.MapPlan("drag", "測試", 500, 300, 520, 330, tag="scan"), shape, 3.0)
+    p = pl.decide(v, shape, 5.0)
+    check("拖過地圖（鏡頭動了）：禁點作廢", p.kind == "click" and (p.x, p.y) == (rx, ry), f"{p.kind} {p.reason}")
+
+    # 引擎：跳出守衛者資訊＝不算走完，點旁邊關掉
+    real_panic, real_mouse, real_time = C.panic_pressed, C.mouse_button_down, E.time
+    clock = Clock()
+    E.time = types.SimpleNamespace(monotonic=clock.monotonic, sleep=real_time.sleep, time=real_time.time)
+    C.panic_pressed = lambda key="F8": False
+    C.mouse_button_down = lambda: False
+    try:
+        eng, grab, calls = make_engine()
+        eng.db.add(E.UNREACHABLE_LABEL, synth_info())
+        eng.rules.set_click(E.UNREACHABLE_LABEL, 0.8125, 0.5556)
+        eng.planner.decide = lambda v_, s_, n_: O.MapPlan("click", "路線測試", 300, 200, node=node(300, 200, O.ENEMY),
+                                                          side=L, route=(L, eng.route.idx[L]))
+        eng.start_autoplay()
+        run(eng, clock)
+        check("點了路線的節點：待確認 (左隊, 0)", eng.route.pending == (L, 0), f"{eng.route.pending}")
+        grab.image = synth_info()
+        clock.t += 2
+        st, notes = run(eng, clock)
+        check("跳出守衛者資訊：路線不前進", eng.route.idx[L] == 0 and eng.route.pending is None, f"{eng.route.idx} {eng.route.pending}")
+        x, y = calls[-1][1], calls[-1][2]
+        check("點旁邊空白關掉", calls[-1][0] == "click" and abs(x - (100 + 0.8125 * W)) <= 3 and abs(y - (50 + 0.5556 * H)) <= 3,
+              f"{calls[-1]}")
+        check("動作記錄寫了走不到", any("走不到" in n for n in notes), f"{notes}")
+        check("那格記成禁點", len(eng.planner._banned) == 1, f"{eng.planner._banned}")
+    finally:
+        E.time = real_time
+        C.panic_pressed, C.mouse_button_down = real_panic, real_mouse
+
+
 def main():
     try:
         test_tracker()
@@ -716,6 +784,7 @@ def main():
         test_engine()
         test_full_route()
         test_snapback()
+        test_unreachable()
     finally:
         shutil.rmtree(SANDBOX, ignore_errors=True)
     print()

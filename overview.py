@@ -1060,6 +1060,8 @@ class MapPlanner:
         self.route_event: Optional[str] = None       # 路線：規劃器自己確認走完的那一步（空格），給 engine 寫進動作記錄
         self._retry_clicked = False                  # 點了「戰敗後重打」（重打的隊記在 route.retry，存檔）
         self._reanchor_n = 0                         # 這次總覽「鏡頭跳回剛行動那隊、重新找」做過幾次（_snapped_back）
+        self._last_click: Optional[Tuple[int, int]] = None   # 最近一次點的節點位置（unreachable 用）
+        self._banned: List[Tuple[int, int]] = []     # 這個鏡頭畫面裡點了只跳資訊、兩隊都走不到的節點（拖地圖／離開總覽就作廢）
         self._reset_scan()
 
     def _reset_scan(self) -> None:
@@ -1494,7 +1496,8 @@ class MapPlanner:
                 continue
             g = g._replace(side=side)
             loose = [n for n, _ in adjacent_nodes(cands, [g], img_shape)]
-            opts = route_options(view.nodes, known + [g], g, h, extra=loose)
+            opts = [o for o in route_options(view.nodes, known + [g], g, h, extra=loose)
+                    if not self._is_banned(o.node, s)]
             if st.kind == WALK:
                 continue
             o, why = match_route_step(st.kind, st.dir, opts, cands, h)
@@ -1557,6 +1560,7 @@ class MapPlanner:
                 plats = [p._replace(side=r.retry) if p is unknown[0] else p for p in plats]
         loose =[n for n, _ in adjacent_nodes(cands, plats, img_shape)]     # 沒圖釘的節點（遊戲有時不顯示圖釘）
         found: Dict[str, Tuple[RouteOpt, str]] = {}
+        guessed: set = set()        # 靠「發光平台前面對得上路線」猜出來的隊（不確定；有確定的隊就先點確定的，11/24）
         missing: Dict[str, Tuple[Platform, str]] = {}
         marks: List[tuple] = [(p.x, p.y, "隊伍" + (SIDE_NAMES[p.side][0] if p.side else "?"), False) for p in plats]
         self.sides = {}
@@ -1570,6 +1574,7 @@ class MapPlanner:
                 self.sides[(o.node.x, o.node.y)] = sd
                 if o.node.pinless:
                     marks.append((o.node.x, o.node.y, f"{KIND_NAMES.get(o.node.kind, '？')}·無圖釘", False))
+            opts = [o for o in opts if not self._is_banned(o.node, s)]
             if st.kind == WALK:
                 o, why = self._walk_option(opts, p, st.dir, h)
             else:
@@ -1587,6 +1592,7 @@ class MapPlanner:
                 gp, o, why = g
                 plats = list(plats) + [gp]
                 found[sd] = (o, why + "（英雄認不出是哪隊，靠路線下一步對得上）")
+                guessed.add(sd)
                 marks.append((gp.x, gp.y, "隊伍" + SIDE_NAMES[sd][0] + "?", False))
 
         self.extra_overlay = marks
@@ -1610,7 +1616,7 @@ class MapPlanner:
 
         if found:
             rank = {k: i for i, k in enumerate(self.priority)}
-            side = min(found, key=lambda sd: (rank.get(r.next(sd).kind, 99), found[sd][0].node.pin.bottom))
+            side = min(found, key=lambda sd: (sd in guessed, rank.get(r.next(sd).kind, 99), found[sd][0].node.pin.bottom))
             o, why = found[side]
             st = r.next(side)
             if st.kind == HEAL:
@@ -1647,6 +1653,21 @@ class MapPlanner:
             target = other_side(self._fresh_actor) if self._fresh_actor else None
         need = "、".join(r.describe_side(sd) for sd in free)
         return self._scan(plats, w, h, f"（路線：{need}）", target=target)
+
+    def _is_banned(self, n: Node, s: float) -> bool:
+        return any(abs(n.x - bx) <= 50 * s and abs(n.y - by) <= 50 * s for bx, by in self._banned)
+
+    def unreachable(self) -> None:
+        """剛剛點的節點兩隊都走不到（11/24：遊戲只跳「迷城守衛者」資訊、沒有挑戰鈕——發光平台猜隊伍時把怪物腳下的
+        魔法陣當成隊伍）。那一步不算走完、不記戰鬥，這個鏡頭畫面裡不再點那格。"""
+        if self.route is not None:
+            self.route.pending = None
+        self._pending = None
+        if self._last_click is not None:
+            self._banned.append(self._last_click)
+            self._last_click = None       # 資訊框停留好幾幀，只記一次
+        self._tracks.clear()
+        self._miss_since = None
 
     def _snapped_back(self, plats: Sequence[Platform], raw: Dict[Tuple[int, int], Optional[str]],
                       found: Dict[str, tuple], missing: Dict[str, tuple], w: int, h: int) -> Optional[MapPlan]:
@@ -1806,6 +1827,7 @@ class MapPlanner:
         if plan.kind == "click" and plan.tag == "retry":
             self._retry_clicked = True
         if plan.kind == "click" and plan.node is not None:
+            self._last_click = (plan.node.x, plan.node.y)
             if plan.node.kind == HEAL:
                 self._fights = {LEFT: 0, RIGHT: 0}    # 治療一點下去兩隊的計數歸零（重新累積）
                 self._pending = None
@@ -1844,6 +1866,7 @@ class MapPlanner:
             self._edge_note = ""
             self._miss_since = None       # 路線：拖完重新看（拖到中間之後要重新等一段時間才算「真的找不到」）
             self._tracks.clear()          # 拖完鏡頭會動，舊的圖釘位置作廢
+            self._banned = []             # 「走不到的節點」是畫面座標，鏡頭動了就作廢
             if self._actor_at is not None:
                 # 地圖內容跟著手指跑（9/24 校準：近處 1.16~1.33 倍、遠處較少；取 1.15）
                 self._actor_at[0] += (plan.x1 - plan.x) * DRAG_GAIN

@@ -73,6 +73,7 @@ def dead_cards(img: np.ndarray, boxes) -> int:
     return n
 
 
+UNREACHABLE_LABEL = "守衛者資訊"   # 11/24：點到兩隊都走不到的守衛者，遊戲只跳資訊、沒有挑戰鈕；點旁邊空白關掉，那一步不算走完
 DONE_LABEL = "挑戰完成"      # 11/22：整輪打完的「Challenge Complete」畫面，點掉之後自動停手
 DEFEAT_LABEL = "戰敗"         # 11/22：戰鬥打輸的結算畫面（點 Quit）；路線退回那一步重打，同一步連輸 MAX_DEFEATS 次就停手
 MAX_DEFEATS = 3
@@ -607,7 +608,11 @@ class Engine:
             if self.autoplay and (self._route_check or self.route.finished):
                 self._check_new_run(m.label)
             return self._step_map(region, img, now, common)
-        if self._in_map:
+        if m.label == UNREACHABLE_LABEL and self._in_map:
+            # 不是「點了有反應」：別 confirm 路線、別 left_overview（關掉之後還是同一個總覽畫面，要記得那格走不到）
+            self.planner.unreachable()
+            self._route_note = "剛剛點的節點兩隊都走不到（只跳出守衛者資訊、沒有挑戰鈕）：關掉，那格先不點、重新找"
+        elif self._in_map:
             # 離開總覽（進了彈窗／戰鬥）＝剛剛那一下有效，重置「點了沒反應」的記錄；照路線點的那一步算走完
             self._in_map = False
             done = self.route.confirm() if self.autoplay else None

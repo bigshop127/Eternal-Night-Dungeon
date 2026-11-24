@@ -198,7 +198,11 @@ PHRASES: Dict[str, str] = {
     "結算2": "Results 2", "結算": "Results", "總覽": "Map", "起始畫面": "Start screen", "前往彈窗": "Go popup",
     "守衛者彈窗": "Guardian popup", "點空白繼續": "Tap to continue", "提示框": "Tips", "五選一": "Pick 1 of 5",
     "獎勵輪盤": "Reward wheel", "戰敗": "Defeat", "復活視窗": "Revive window", "挑戰完成": "Challenge Complete",
-    "累積獎勵": "Cumulative rewards",
+    "累積獎勵": "Cumulative rewards", "守衛者資訊": "Guardian info (unreachable)",
+    "剛剛點的節點兩隊都走不到（只跳出守衛者資訊、沒有挑戰鈕）：關掉，那格先不點、重新找":
+        "Neither team can reach the node just tapped (guardian info only, no Challenge button): closing it, skipping that node and looking again",
+    "拖完地圖鏡頭又跳回": "After the drag the camera jumped back to the ", "（遊戲把剛剛的拖曳蓋掉了），從": " (the game undid the drag); from the ",
+    "重新找": " searching again for the ",
     # 動作記錄
     "自動操控開始（--autostart）": "Auto started (--autostart)",
     "--autostart 沒有開成：": "--autostart didn't start: ",
